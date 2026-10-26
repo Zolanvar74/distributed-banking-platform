@@ -1,0 +1,184 @@
+name: distributed-banking
+
+# Deliberately NO Docker automatic restart policies: Bonus II requires
+# a custom self-healing controller, implemented in later stages.
+x-app: &app
+  image: distributed-banking-app:stage02
+  build: .
+  networks: [bank-net]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 10s
+
+x-postgres: &postgres
+  image: postgres:16
+  networks: [bank-net]
+  environment:
+    POSTGRES_USER: banking
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env first}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 10s
+
+services:
+  metadata-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: banking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing .env}
+      POSTGRES_DB: metadata
+    volumes:
+      - metadata-data:/var/lib/postgresql/data
+      - ./sql/metadata/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+
+  shard-a-db:
+    <<: *postgres
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    environment:
+      POSTGRES_USER: banking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing .env}
+      POSTGRES_DB: shard_a
+    volumes:
+      - shard-a-data:/var/lib/postgresql/data
+      - ./sql/shard/01_shard_a.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+
+  shard-b-db:
+    <<: *postgres
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    environment:
+      POSTGRES_USER: banking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing .env}
+      POSTGRES_DB: shard_b
+    volumes:
+      - shard-b-data:/var/lib/postgresql/data
+      - ./sql/shard/02_shard_b.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+
+  # One-shot schema migrator. Uses named DB volumes and never resets data.
+  schema-migrator:
+    image: distributed-banking-app:stage02
+    build: .
+    command: ["python", "scripts/apply_migrations.py"]
+    networks: [bank-net]
+    environment:
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      SHARD_A_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
+      SHARD_B_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
+    depends_on:
+      metadata-db: {condition: service_healthy}
+      shard-a-db: {condition: service_healthy}
+      shard-b-db: {condition: service_healthy}
+
+  shard-a-1:
+    <<: *app
+    command: ["uvicorn", "services.banking.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: A
+      REPLICA_ID: A1
+      REPLICA_HOST: shard-a-1
+      SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+      shard-a-db: {condition: service_healthy}
+
+  shard-a-2:
+    <<: *app
+    command: ["uvicorn", "services.banking.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: A
+      REPLICA_ID: A2
+      REPLICA_HOST: shard-a-2
+      SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+      shard-a-db: {condition: service_healthy}
+
+  shard-b-1:
+    <<: *app
+    command: ["uvicorn", "services.banking.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: B
+      REPLICA_ID: B1
+      REPLICA_HOST: shard-b-1
+      SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+      shard-b-db: {condition: service_healthy}
+
+  shard-b-2:
+    <<: *app
+    command: ["uvicorn", "services.banking.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SHARD_ID: B
+      REPLICA_ID: B2
+      REPLICA_HOST: shard-b-2
+      SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+      shard-b-db: {condition: service_healthy}
+
+  gateway:
+    <<: *app
+    command: ["uvicorn", "services.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
+    environment:
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+      shard-a-1: {condition: service_healthy}
+      shard-a-2: {condition: service_healthy}
+      shard-b-1: {condition: service_healthy}
+      shard-b-2: {condition: service_healthy}
+
+  coordinator:
+    <<: *app
+    command: ["uvicorn", "services.coordinator.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+
+  migration-manager:
+    <<: *app
+    command: ["uvicorn", "services.migration_manager.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+
+  self-healing:
+    <<: *app
+    command: ["uvicorn", "services.self_healing.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+      metadata-db: {condition: service_healthy}
+    # Docker Engine socket is NOT mounted at this stage. It will be
+    # introduced in the self-healing stage with explicit security warnings.
+
+networks:
+  bank-net:
+    driver: bridge
+
+volumes:
+  metadata-data:
+  shard-a-data:
+  shard-b-data:
