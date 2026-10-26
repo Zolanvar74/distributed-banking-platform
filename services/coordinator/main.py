@@ -22,6 +22,8 @@ from psycopg.types.json import Jsonb
 from shared.banking_contract import TransferRequest, canonical_amount, fingerprint
 from shared.metadata import list_replicas
 from shared.two_pc import gid_for
+from shared.durable_status import status_for_tx, status_for_request
+from shared.stage07_faults import after_first_commit_ack
 
 META = os.environ["METADATA_DATABASE_URL"]
 TOKEN = os.environ["INTERNAL_2PC_TOKEN"]
@@ -107,21 +109,7 @@ def _get_transaction(txid: UUID):
 
 
 def _status_payload(txid: UUID) -> tuple[int, dict]:
-    tx, parts = _get_transaction(txid)
-    if tx is None:
-        return 404, {"detail": "transaction not found"}
-    completed = tx["state"] == "COMPLETED"
-    status = "COMMITTED" if completed and tx["decision"] == "COMMIT" else (
-        "ABORTED" if completed and tx["decision"] == "ABORT" else "PENDING")
-    code = 200 if status == "COMMITTED" else 409 if status == "ABORTED" else 202
-    return code, {
-        "tx_id": str(txid), "request_id": tx["client_request_id"],
-        "from_account": tx["from_account"], "to_account": tx["to_account"],
-        "amount": str(tx["amount"]), "status": status,
-        "state": tx["state"], "decision": tx["decision"],
-        "participants": [{"shard": p["shard_id"], "vote": p["vote"],
-                          "ack": p["completion_ack"]} for p in parts],
-    }
+    return status_for_tx(META, txid)
 
 
 def _post_participant(shard: str, path: str, payload: dict) -> dict | None:
@@ -191,10 +179,17 @@ def _ack(txid: UUID, shard: str) -> None:
 
 def _try_complete(txid: UUID) -> None:
     with psycopg.connect(META) as conn:
-        conn.execute("UPDATE transactions SET state='COMPLETED',updated_at=clock_timestamp() "
-                     "WHERE tx_id=%s AND decision IS NOT NULL "
-                     "AND NOT EXISTS (SELECT 1 FROM transaction_participants "
-                     "WHERE tx_id=%s AND completion_ack=false)", (txid, txid))
+        result = conn.execute(
+            "UPDATE transactions SET state='COMPLETED',updated_at=clock_timestamp() "
+            "WHERE tx_id=%s AND state <> 'COMPLETED' AND decision IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM transaction_participants "
+            "WHERE tx_id=%s AND completion_ack=false) RETURNING tx_id", (txid, txid)
+        ).fetchone()
+        if result:
+            conn.execute(
+                "INSERT INTO transaction_recovery_events(tx_id,event_type,details) "
+                "VALUES (%s,'PHASE_2_COMPLETED','{}'::jsonb)", (txid,)
+            )
 
 
 def _deliver(txid: UUID, tx: dict, parts: list[dict]) -> None:
@@ -211,6 +206,11 @@ def _deliver(txid: UUID, tx: dict, parts: list[dict]) -> None:
         })
         if data and data.get("outcome") == ("COMMITTED" if decision == "COMMIT" else "ABORTED"):
             _ack(txid, p["shard_id"])
+            # The one-shot crash occurs *only* after COMMIT decision is durable,
+            # first participant is committed and its ACK is durable, while the
+            # second participant still has a prepared transaction.
+            if decision == "COMMIT":
+                after_first_commit_ack(META, txid)
     _try_complete(txid)
 
 
@@ -254,7 +254,6 @@ def _drive(txid: UUID) -> None:
 
 async def _recovery_loop():
     while True:
-        await asyncio.sleep(4)
         try:
             with psycopg.connect(META) as conn:
                 pending = [r[0] for r in conn.execute(
@@ -269,6 +268,7 @@ async def _recovery_loop():
             raise
         except Exception:
             log.exception("recovery metadata unavailable")
+        await asyncio.sleep(4)
 
 
 @asynccontextmanager
@@ -284,14 +284,15 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Durable Transaction Coordinator / Stage 06", lifespan=lifespan)
+app = FastAPI(title="Durable Transaction Coordinator / Stage 07", lifespan=lifespan)
 
 
 @app.get("/health")
 def health():
     with psycopg.connect(META, connect_timeout=2) as conn:
         conn.execute("SELECT 1")
-    return {"status": "ok", "service": "coordinator", "stage": "06"}
+    return {"status": "ok", "service": "coordinator", "stage": "07",
+            "fault_injection_enabled": os.environ.get("STAGE07_ENABLE_FAULTS") == "1"}
 
 
 @app.post("/internal/transfers/cross", dependencies=[Depends(_internal_token)])
@@ -313,10 +314,5 @@ def transaction_status(tx_id: UUID):
 
 @app.get("/internal/requests/{request_id}", dependencies=[Depends(_internal_token)])
 def request_status(request_id: str):
-    with psycopg.connect(META) as conn:
-        row = conn.execute("SELECT tx_id FROM transactions WHERE client_request_id=%s",
-                           (request_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="cross-shard request not found")
-    code, result = _status_payload(row[0])
+    code, result = status_for_request(META, request_id)
     return JSONResponse(status_code=code, content=result)

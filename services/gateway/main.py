@@ -18,13 +18,13 @@ from services.gateway.balancer import RoundRobin, identity_ok
 from shared.metadata import Owner, active_shard_map, get_owner, list_replicas
 
 log = logging.getLogger("banking.gateway")
-app = FastAPI(title="Shard-Aware Gateway / Stage 06")
+app = FastAPI(title="Shard-Aware Gateway / Stage 07")
 _balancer = RoundRobin()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "gateway", "stage": "06"}
+    return {"status": "ok", "service": "gateway", "stage": "07"}
 
 
 async def probe_healthy(shard_id: str) -> tuple[list[dict], list[dict]]:
@@ -231,9 +231,13 @@ async def local_status(account_id: str, request_id: str):
     raise HTTPException(status_code=503, detail="status currently unavailable")
 
 
-# Stage 06: Gateway invokes the durable coordinator for cross-shard transfers.
-# Unknown coordinator outcomes are returned as UNKNOWN, never "transfer failed".
+# Stage 07: cross-shard POST still goes only to Coordinator. Durable GET
+# status is read *directly from metadata*: query works while Coordinator is down.
 import os
+from uuid import UUID
+
+import psycopg
+from shared.durable_status import status_for_tx, status_for_request
 
 
 async def forward_coordinator(path: str, payload: dict | None = None,
@@ -257,58 +261,22 @@ async def forward_coordinator(path: str, payload: dict | None = None,
 
 
 @app.get("/transactions/{tx_id}")
-async def global_transaction_status(tx_id: str):
-    from uuid import UUID
+def global_transaction_status(tx_id: str):
     try:
-        txid = str(UUID(tx_id))
+        parsed = UUID(tx_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid tx_id") from exc
-    return await forward_coordinator(f"/internal/transactions/{txid}")
+    try:
+        code, result = status_for_tx(os.environ["METADATA_DATABASE_URL"], parsed)
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="metadata unavailable; status UNKNOWN") from exc
+    return JSONResponse(status_code=code, content=result)
 
 
 @app.get("/transfers/requests/{request_id}")
-async def cross_request_status(request_id: str):
-    from urllib.parse import quote
-    return await forward_coordinator(f"/internal/requests/{quote(request_id, safe='')}",
-                                     request_id=request_id)
-
-
-# Stage 06: Gateway invokes durable coordinator for cross-shard transfers.
-import os
-
-
-async def forward_coordinator(path: str, payload: dict | None = None,
-                              request_id: str | None = None, method: str = "GET"):
-    base = os.environ["COORDINATOR_URL"].rstrip("/")
-    token = os.environ["INTERNAL_2PC_TOKEN"]
+def cross_request_status(request_id: str):
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(24.0, connect=2.0), trust_env=False) as client:
-            if method == "POST":
-                response = await client.post(base + path, json=payload,
-                                             headers={"X-Internal-Token": token})
-            else:
-                response = await client.get(base + path,
-                                            headers={"X-Internal-Token": token})
-            return JSONResponse(status_code=response.status_code, content=response.json())
-    except (httpx.RequestError, ValueError):
-        return JSONResponse(status_code=503, content={
-            "detail": "coordinator unavailable or reply uncertain; query request status",
-            "status": "UNKNOWN", "request_id": request_id,
-        })
-
-
-@app.get("/transactions/{tx_id}")
-async def global_transaction_status(tx_id: str):
-    from uuid import UUID
-    try:
-        txid = str(UUID(tx_id))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="invalid tx_id") from exc
-    return await forward_coordinator(f"/internal/transactions/{txid}")
-
-
-@app.get("/transfers/requests/{request_id}")
-async def cross_request_status(request_id: str):
-    from urllib.parse import quote
-    return await forward_coordinator(f"/internal/requests/{quote(request_id, safe='')}",
-                                     request_id=request_id)
+        code, result = status_for_request(os.environ["METADATA_DATABASE_URL"], request_id)
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="metadata unavailable; status UNKNOWN") from exc
+    return JSONResponse(status_code=code, content=result)

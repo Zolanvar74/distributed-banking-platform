@@ -1,8 +1,16 @@
-# Distributed Banking Platform — Stage 06
+# Distributed Banking Platform — Stage 07
 
-**Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose.** Continuation of Stage 05 on existing named volumes.
+**Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose.** Continuation of Stage 06 on existing named volumes.
 
-Stage 06 implements genuine **distributed Two-Phase Commit (2PC)** across Shards A and B:
+Stage 07 adds **repeatable Coordinator crash recovery proof** to Stage 06 genuine
+2PC. In addition to the existing banking, routing, and 2PC functionality:
+
+- Deterministic one-shot process crash after the first durable COMMIT ACK.
+- Recovery from COMMIT_DECIDED after restart and safe duplicate delivery.
+- Durable PENDING transaction status readable by Gateway even when Coordinator is down.
+- Integration checks for both shard prepared/commit states and money conservation.
+
+Stage 06 capabilities retained:
 
 - Shard-local SQL `PREPARE TRANSACTION` for debit/credit; separate shard-local PostgreSQL instances.
 - Durable Coordinator decisions (COMMIT/ABORT), vote tracking, safe repeated messages, and a periodic recovery worker.
@@ -10,7 +18,7 @@ Stage 06 implements genuine **distributed Two-Phase Commit (2PC)** across Shards
 - Status query by `tx_id` or `request_id`, PENDING/UNKNOWN for unresolved work; success only after both durable ACKs.
 - Earlier balance, sharding, replication and failover APIs remain.
 
-**Not yet complete:** deliberate crash-injection experiments (Stage 07), replacement containers (Stages 08–09), and online migration with safe 2PC cutover (Stages 10–14). Both bonuses remain required to finish the assignment.
+**Not yet complete:** replacement containers (Stages 08–09), and online migration with safe 2PC cutover (Stages 10–14). Both bonuses remain required to finish the assignment.
 
 ## Windows upgrade
 
@@ -35,9 +43,20 @@ docker compose run --rm schema-migrator python -m scripts.verify_stage03
 docker compose run --rm schema-migrator python -m scripts.verify_stage04 --scenario=normal
 docker compose run --rm schema-migrator python -m scripts.verify_stage05
 docker compose run --rm schema-migrator python -m scripts.verify_stage06
+docker compose run --rm schema-migrator python -m pytest -q tests
 ```
 
 Expected: `STAGE 06 TWO-PHASE COMMIT CHECK: ALL CHECKS PASSED`.
+
+
+## Stage 07 exact crash test
+
+Run the test in **[Stage 07 crash-recovery runbook](docs/stage07-crash-recovery.md)**.
+It includes arming a unique request ID, enabling the opt-in crash flag,
+provably checking durable COMMIT and partial acknowledgements **before**
+restart, then restarting and checking final transaction/balance consistency.
+**Never run `docker compose down -v`.** The `.env` and `.git` from prior stages
+must be retained. The crash flag is **OFF by default**.
 
 ## Public API example
 
@@ -56,10 +75,10 @@ See [2PC protocol, recovery and limits](docs/stage06-2pc.md) and earlier stage r
 
 ```powershell
 git add .
-git commit -m "feat: stage 06 durable cross-shard two-phase commit"
+git commit -m "feat: stage 07 controlled coordinator crash recovery"
 git push origin main
-git tag stage-06
-git push origin stage-06
+git tag stage-07
+git push origin stage-07
 ```
 
 Publish only after all acceptance checks pass. Keep `.env` out of version control.
