@@ -1,10 +1,9 @@
-"""Stage 04 shard-aware read routing with healthy replica failover.
+"""Stage 05 shard-aware routing with safe local write semantics.
 
 The registry is discovery-only. The Gateway probes *each* candidate to confirm
 it is alive and matches the expected shard and replica identity. On read-only
 GET, a failed selected replica can be retried on an alternate healthy replica
-within the same shard. All money-changing APIs arrive in later stages and must
-not copy this automatic retry behavior without idempotency keys.
+within the same shard. Money-changing APIs choose one replica only; unknown outcomes are exposed.
 """
 from __future__ import annotations
 
@@ -19,13 +18,13 @@ from services.gateway.balancer import RoundRobin, identity_ok
 from shared.metadata import Owner, active_shard_map, get_owner, list_replicas
 
 log = logging.getLogger("banking.gateway")
-app = FastAPI(title="Shard-Aware Gateway / Stage 04")
+app = FastAPI(title="Shard-Aware Gateway / Stage 05")
 _balancer = RoundRobin()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "gateway", "stage": "04"}
+    return {"status": "ok", "service": "gateway", "stage": "05"}
 
 
 async def probe_healthy(shard_id: str) -> tuple[list[dict], list[dict]]:
@@ -141,3 +140,92 @@ async def get_balance(account_id: str):
             return JSONResponse(status_code=response.status_code, content=payload)
     raise HTTPException(status_code=503,
                         detail=f"all healthy candidates failed for shard {owner.shard_id}")
+
+# Stage 05 write operations: a single selected replica, NO automatic POST retry.
+# If the connection is lost after dispatch, return UNKNOWN; retry with the same
+# request_id (safe within a shard) or query operation status before retrying.
+from shared.banking_contract import WriteRequest, TransferRequest
+
+
+async def forward_write(shard_id: str, epoch: int, path: str,
+                        payload: dict, request_id: str):
+    replica = (await ordered_healthy(shard_id))[0]
+    headers = {"X-Expected-Shard": shard_id, "X-Routing-Epoch": str(epoch)}
+    url = f"http://{replica['hostname']}:{replica['port']}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(16.0, connect=2.0), trust_env=False) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:
+        log.warning("write outcome unknown request_id=%s replica=%s reason=%s",
+                    request_id, replica["replica_id"], type(exc).__name__)
+        return JSONResponse(status_code=503, content={
+            "detail": "write outcome unknown; inspect status or retry SAME request_id",
+            "request_id": request_id, "outcome": "UNKNOWN"})
+    try:
+        data = response.json()
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "detail": "non-JSON response; operation outcome unknown",
+            "request_id": request_id, "outcome": "UNKNOWN"})
+    if not isinstance(data, dict):
+        return JSONResponse(status_code=502, content={
+            "detail": "malformed replica response", "request_id": request_id,
+            "outcome": "UNKNOWN"})
+    if response.status_code == 200 and (
+        data.get("shard") != shard_id or data.get("served_by") != replica["replica_id"]
+        or data.get("request_id") != request_id
+    ):
+        log.error("write response identity mismatch request_id=%s", request_id)
+        return JSONResponse(status_code=502, content={
+            "detail": "replica identity mismatch; operation outcome unknown",
+            "request_id": request_id, "outcome": "UNKNOWN"})
+    return JSONResponse(status_code=response.status_code, content=data)
+
+
+@app.post("/accounts/{account_id}/deposit")
+async def deposit(account_id: str, body: WriteRequest):
+    owner = require_owner(account_id)
+    return await forward_write(owner.shard_id, owner.epoch,
+                               f"/internal/accounts/{account_id}/deposit",
+                               body.model_dump(), body.request_id)
+
+
+@app.post("/accounts/{account_id}/withdraw")
+async def withdraw(account_id: str, body: WriteRequest):
+    owner = require_owner(account_id)
+    return await forward_write(owner.shard_id, owner.epoch,
+                               f"/internal/accounts/{account_id}/withdraw",
+                               body.model_dump(), body.request_id)
+
+
+@app.post("/transfers")
+async def transfer(body: TransferRequest):
+    if body.from_account == body.to_account:
+        raise HTTPException(status_code=422, detail="source and target must differ")
+    source, destination = require_owner(body.from_account), require_owner(body.to_account)
+    if source.shard_id != destination.shard_id:
+        # Explicitly refuse partial updates. Full cross-shard 2PC is Stage 06.
+        raise HTTPException(status_code=501, detail="cross-shard transfer requires 2PC (Stage 06)")
+    if source.epoch != destination.epoch:
+        raise HTTPException(status_code=409, detail="local transfer crosses different ownership epochs")
+    return await forward_write(source.shard_id, source.epoch,
+                               "/internal/transfers/local", body.model_dump(), body.request_id)
+
+
+@app.get("/accounts/{account_id}/operations/{request_id}")
+async def local_status(account_id: str, request_id: str):
+    """Shard-local result lookup only; cross-shard/global recovery comes later."""
+    owner = require_owner(account_id)
+    replicas = await ordered_healthy(owner.shard_id)
+    headers = {"X-Expected-Shard": owner.shard_id, "X-Routing-Epoch": str(owner.epoch)}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0), trust_env=False) as client:
+        for replica in replicas:
+            try:
+                response = await client.get(
+                    f"http://{replica['hostname']}:{replica['port']}"
+                    f"/internal/accounts/{account_id}/operations/{request_id}",
+                    headers=headers)
+                return JSONResponse(status_code=response.status_code, content=response.json())
+            except (httpx.RequestError, ValueError):
+                continue
+    raise HTTPException(status_code=503, detail="status currently unavailable")

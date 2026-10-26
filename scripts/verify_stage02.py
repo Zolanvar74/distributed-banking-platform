@@ -1,5 +1,6 @@
 """Read-only checks of Stage 02 schema; run in the schema-migrator container."""
 import os
+from decimal import Decimal
 
 import psycopg
 
@@ -29,7 +30,11 @@ def check_metadata() -> None:
 
 def check_shard(env_var: str, db: str, ranges: tuple, sample: str, amount: str) -> None:
     with psycopg.connect(os.environ[env_var]) as c:
-        assert c.execute("SELECT balance::text FROM accounts WHERE account_id=%s", (sample,)).fetchone() == (amount,)
+        # After Stage 05, valid banking activity may change sample balances.
+        # Stage 02 regression must verify the row is present and nonnegative,
+        # rather than assume the initial demo's pre-mutation amount forever.
+        balance_row = c.execute("SELECT balance FROM accounts WHERE account_id=%s", (sample,)).fetchone()
+        assert balance_row is not None and balance_row[0] >= Decimal("0"), balance_row
         assert c.execute("SELECT range_start, range_end, epoch, writable FROM ownership_fences").fetchall() == [
             (ranges[0], ranges[1], 1, True)
         ]

@@ -1,86 +1,61 @@
-# Distributed Banking Platform — Stage 04
+# Distributed Banking Platform — Stage 05
 
 **Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose**  
-This is a continuation of the working Stage 02 project, **not** a fresh installation.
+Continuation of Stage 04 with **existing persistent volumes**. Both advanced bonuses (**Live Re-Sharding** and **Autonomous Self-Healing**) are mandatory future milestones.
 
-Stage 04 verifies correct two-shard account distribution, Gateway owner selection, live replica checks, and shard-local read routing claims. It preserves all Stage 02 metadata (durable 2PC placeholders, migration checkpoints/fences and replica registry). **Deposits, withdrawals, transfers, actual 2PC, self-healing and online migration are not yet implemented.** Both expert bonuses remain required project milestones.
+## Implemented
 
-## Upgrade without wiping previous account data
+- Shards A/B with 2 application replicas each sharing shard-local PostgreSQL storage.
+- Metadata-based ownership map/epoch, health-probed replica Round Robin, read failover.
+- Deposits, withdrawals, **same-shard transfers**, durable idempotent request IDs, account versioning, atomic change journals and write fences under PostgreSQL row locks.
+- Shard-local status lookup for uncertain local operations.
+- Cross-shard transfers **not yet available**: explicit HTTP 501 until real 2PC is implemented.
+- Stubs and persistent schema for Coordinator, Migration Manager and Self-Healing, not yet complete.
 
-1. Extract this ZIP. Copy the files from its `distributed-banking-platform` folder **into the existing project root** (the folder containing your `.git` and `.env`). Do not replace the existing `.env` or `.git` folder.
-2. Run in **Windows PowerShell** from the project root:
+## Upgrade from Stage 04 (Windows PowerShell)
+
+Extract the ZIP and copy its `distributed-banking-platform` contents **into your current working Git repository**. Preserve `.git`, `.env` and named PostgreSQL volumes. No new `git init`. Do **not** use `docker compose down -v`.
 
 ```powershell
 docker compose config --quiet
 docker compose up --build -d
 docker compose ps
-docker compose run --rm schema-migrator python scripts/verify_stage02.py
-docker compose exec -T gateway python scripts/smoke_test.py
-docker compose run --rm schema-migrator python scripts/verify_stage03.py
+docker compose logs schema-migrator
 ```
 
-Expected final messages:
+New `003_stage05_local_acid.sql` is applied to **both** shard DBs by the existing one-shot migrator. `002_foundation.sql` checksums and old data are unchanged; migration is transactional and rerunnable. The 11 long-running services remain; `schema-migrator` exits successfully.
+
+## Test the release
+
+```powershell
+docker compose run --rm schema-migrator python -m scripts.verify_stage02
+docker compose run --rm schema-migrator python -m scripts.verify_stage03
+docker compose run --rm schema-migrator python -m scripts.verify_stage04 --scenario=normal
+docker compose run --rm schema-migrator python -m scripts.verify_stage05
+docker compose exec -T gateway python -m scripts.smoke_test
+```
+
+Expected new acceptance line:
 
 ```text
-STAGE 02 SCHEMA CHECK: ALL CHECKS PASSED
-STAGE 01 SMOKE TEST: ALL CHECKS PASSED
-STAGE 03 SHARDING CHECK: ALL CHECKS PASSED
+STAGE 05 BANKING/CONCURRENCY CHECK: ALL CHECKS PASSED
 ```
 
-The exact Stage 02 and Stage 01 regression test names are deliberately unchanged.
+The 05 test *writes to real accounts but compensates all balance changes on success*. It does not delete logs, deduplication records or incremented account versions. Do not run under unrelated workload; interrupted runs may leave effects that require reconciliation.
 
-**Never use `docker compose down -v`** because `-v` deletes named Postgres volumes. The Compose `name: distributed-banking` remains the same, and its named volumes are reused. The Stage 02 SQL migration checksums and files are unchanged. The one-shot `schema-migrator` exits after completion; 11 application/DB containers remain running.
+Detailed endpoint bodies, rollback guarantees, concurrency mechanism, testing and limitations are in **[docs/stage05-local-banking.md](docs/stage05-local-banking.md)**. Swagger documentation: <http://localhost:8000/docs>. Stage 04 runbook is still in `docs/stage04-replica-failover.md`.
 
-## Manually demonstrate routing
+## GitHub
 
-Open:
-
-- http://localhost:8000/debug/shard-map
-- http://localhost:8000/debug/route/A0500
-- http://localhost:8000/accounts/A0500/balance
-- http://localhost:8000/debug/route/A1500
-- http://localhost:8000/accounts/A1500/balance
-
-Inspect the two physical databases separately:
-
-```powershell
-docker compose exec -T shard-a-db psql -U banking -d shard_a -c "SELECT account_id, balance FROM accounts ORDER BY account_id;"
-docker compose exec -T shard-b-db psql -U banking -d shard_b -c "SELECT account_id, balance FROM accounts ORDER BY account_id;"
-```
-
-All Stage 04 details, endpoint contracts and limits: [docs/stage03-routing-contract.md](docs/stage03-routing-contract.md).
-
-## Troubleshooting
-
-```powershell
-docker compose ps -a
-docker compose logs --tail=100 schema-migrator
-docker compose logs --tail=100 gateway shard-a-1 shard-a-2 shard-b-1 shard-b-2
-```
-
-If the new health/identity filtering rejects traffic, inspect the banking services' registrations and check whether the correct containers started. Stage 04 uses the existing `replica_registry`; the future autonomous controller is not yet active.
-
-## Commit Stage 04 to the SAME GitHub repository
-
-Only after all tests pass:
+Once all Docker tests pass, commit to your existing repository and create tag `stage-05`:
 
 ```powershell
 git status
 git add .
-git status
-git commit -m "feat: verify stage 03 ownership and shard-aware routing"
+git commit -m "feat: stage 05 local ACID banking and concurrency"
 git push origin main
-git tag stage-03
-git push origin stage-03
+git tag stage-05
+git push origin stage-05
 ```
 
-Check that `.env` is **not** tracked: `git ls-files .env` must print nothing. Never commit database dumps containing private data or `.env` credentials.
-
-
-## Stage 04 — Replica load balancing and failover
-
-See [Stage 04 runbook](docs/stage04-replica-failover.md) for read-only health routing, replica interruption and recovery tests. The Docker image also contains a permanent `PYTHONPATH=/app` fix for the Stage 03 verification command.
-
-```powershell
-docker compose run --rm schema-migrator python -m scripts.verify_stage04 --scenario=normal
-```
+Keep `.env` out of GitHub (`git ls-files .env` prints nothing). Do not publish database passwords or customer data. Next: Stage 06 — **genuine cross-shard 2PC**.

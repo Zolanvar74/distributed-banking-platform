@@ -1,4 +1,5 @@
-"""Runnable inside gateway container: docker compose exec -T gateway python scripts/smoke_test.py"""
+"""Balance values are deliberately dynamic after Stage 05 banking writes.
+Runnable inside gateway container: docker compose exec -T gateway python scripts/smoke_test.py"""
 import json
 import time
 import urllib.error
@@ -17,18 +18,15 @@ def check() -> None:
     assert health["status"] == "ok", health
 
     tests = [
-        ("A0001", "A", "100.00"),
-        ("A0500", "A", "1000.00"),
-        ("A1000", "A", "300.00"),
-        ("A1001", "B", "300.00"),
-        ("A1500", "B", "500.00"),
-        ("A2000", "B", "100.00"),
+        ("A0001", "A"), ("A0500", "A"), ("A1000", "A"),
+        ("A1001", "B"), ("A1500", "B"), ("A2000", "B"),
     ]
-    for account, shard, amount in tests:
+    from decimal import Decimal
+    for account, shard in tests:
         record = get(f"/accounts/{account}/balance")
         assert record["shard"] == shard, record
-        assert record["balance"] == amount, record
-        print(f"PASS balance {account} -> {shard} / {amount} / {record['served_by']}")
+        assert Decimal(record["balance"]) >= 0, record
+        print(f"PASS balance {account} -> {shard} / {record['balance']} / {record['served_by']}")
 
     for shard, account in [("A", "A0500"), ("B", "A1500")]:
         selected = {get(f"/debug/route/{account}")["selected_replica"] for _ in range(8)}
