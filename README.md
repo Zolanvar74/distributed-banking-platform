@@ -1,20 +1,22 @@
-# Distributed Banking Platform — Stage 05
+# Distributed Banking Platform — Stage 06
 
-**Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose**  
-Continuation of Stage 04 with **existing persistent volumes**. Both advanced bonuses (**Live Re-Sharding** and **Autonomous Self-Healing**) are mandatory future milestones.
+**Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose.** Continuation of Stage 05 on existing named volumes.
 
-## Implemented
+Stage 06 implements genuine **distributed Two-Phase Commit (2PC)** across Shards A and B:
 
-- Shards A/B with 2 application replicas each sharing shard-local PostgreSQL storage.
-- Metadata-based ownership map/epoch, health-probed replica Round Robin, read failover.
-- Deposits, withdrawals, **same-shard transfers**, durable idempotent request IDs, account versioning, atomic change journals and write fences under PostgreSQL row locks.
-- Shard-local status lookup for uncertain local operations.
-- Cross-shard transfers **not yet available**: explicit HTTP 501 until real 2PC is implemented.
-- Stubs and persistent schema for Coordinator, Migration Manager and Self-Healing, not yet complete.
+- Shard-local SQL `PREPARE TRANSACTION` for debit/credit; separate shard-local PostgreSQL instances.
+- Durable Coordinator decisions (COMMIT/ABORT), vote tracking, safe repeated messages, and a periodic recovery worker.
+- Gateway routes same-shard transfers to one atomic local transaction and cross-shard transfers to the Coordinator.
+- Status query by `tx_id` or `request_id`, PENDING/UNKNOWN for unresolved work; success only after both durable ACKs.
+- Earlier balance, sharding, replication and failover APIs remain.
 
-## Upgrade from Stage 04 (Windows PowerShell)
+**Not yet complete:** deliberate crash-injection experiments (Stage 07), replacement containers (Stages 08–09), and online migration with safe 2PC cutover (Stages 10–14). Both bonuses remain required to finish the assignment.
 
-Extract the ZIP and copy its `distributed-banking-platform` contents **into your current working Git repository**. Preserve `.git`, `.env` and named PostgreSQL volumes. No new `git init`. Do **not** use `docker compose down -v`.
+## Windows upgrade
+
+1. Extract ZIP and copy files into **existing** Git project. Keep `.git`, `.env` and named database volumes.
+2. In your existing `.env`, optionally add `TWO_PC_TOKEN=a-long-private-random-value`. If omitted, Compose uses a **development-only** token; do not use the default outside a trusted local development environment.
+3. In the folder containing `compose.yaml`, run:
 
 ```powershell
 docker compose config --quiet
@@ -23,39 +25,41 @@ docker compose ps
 docker compose logs schema-migrator
 ```
 
-New `003_stage05_local_acid.sql` is applied to **both** shard DBs by the existing one-shot migrator. `002_foundation.sql` checksums and old data are unchanged; migration is transactional and rerunnable. The 11 long-running services remain; `schema-migrator` exits successfully.
+**Never run `docker compose down -v`** — it deletes your persistent database data.
 
-## Test the release
+## Verify
 
 ```powershell
 docker compose run --rm schema-migrator python -m scripts.verify_stage02
 docker compose run --rm schema-migrator python -m scripts.verify_stage03
 docker compose run --rm schema-migrator python -m scripts.verify_stage04 --scenario=normal
 docker compose run --rm schema-migrator python -m scripts.verify_stage05
-docker compose exec -T gateway python -m scripts.smoke_test
+docker compose run --rm schema-migrator python -m scripts.verify_stage06
 ```
 
-Expected new acceptance line:
+Expected: `STAGE 06 TWO-PHASE COMMIT CHECK: ALL CHECKS PASSED`.
 
-```text
-STAGE 05 BANKING/CONCURRENCY CHECK: ALL CHECKS PASSED
-```
-
-The 05 test *writes to real accounts but compensates all balance changes on success*. It does not delete logs, deduplication records or incremented account versions. Do not run under unrelated workload; interrupted runs may leave effects that require reconciliation.
-
-Detailed endpoint bodies, rollback guarantees, concurrency mechanism, testing and limitations are in **[docs/stage05-local-banking.md](docs/stage05-local-banking.md)**. Swagger documentation: <http://localhost:8000/docs>. Stage 04 runbook is still in `docs/stage04-replica-failover.md`.
-
-## GitHub
-
-Once all Docker tests pass, commit to your existing repository and create tag `stage-05`:
+## Public API example
 
 ```powershell
-git status
-git add .
-git commit -m "feat: stage 05 local ACID banking and concurrency"
-git push origin main
-git tag stage-05
-git push origin stage-05
+$rid = [guid]::NewGuid().ToString()
+$body = @{ from_account="A0500"; to_account="A1500"; amount="2.30"; request_id=$rid } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/transfers" -ContentType "application/json" -Body $body
+Invoke-RestMethod "http://localhost:8000/transfers/requests/$rid"
 ```
 
-Keep `.env` out of GitHub (`git ls-files .env` prints nothing). Do not publish database passwords or customer data. Next: Stage 06 — **genuine cross-shard 2PC**.
+The example makes a real, non-reversed transfer. For development tests, the automatic test reverses its changes on success. If the response is `PENDING`, query status later, **never change request_id for a retry of the same intended payment**.
+
+See [2PC protocol, recovery and limits](docs/stage06-2pc.md) and earlier stage runbooks under `docs/`.
+
+## Publish to existing GitHub repository
+
+```powershell
+git add .
+git commit -m "feat: stage 06 durable cross-shard two-phase commit"
+git push origin main
+git tag stage-06
+git push origin stage-06
+```
+
+Publish only after all acceptance checks pass. Keep `.env` out of version control.

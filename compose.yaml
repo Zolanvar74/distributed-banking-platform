@@ -3,7 +3,7 @@ name: distributed-banking
 # Deliberately NO Docker automatic restart policies: Bonus II requires
 # a custom self-healing controller, implemented in later stages.
 x-app: &app
-  image: distributed-banking-app:stage05
+  image: distributed-banking-app:stage06
   build: .
   networks: [bank-net]
   healthcheck:
@@ -61,12 +61,13 @@ services:
 
   # One-shot schema migrator. Uses named DB volumes and never resets data.
   schema-migrator:
-    image: distributed-banking-app:stage05
+    image: distributed-banking-app:stage06
     build: .
     command: ["python", "scripts/apply_migrations.py"]
     networks: [bank-net]
     environment:
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
       SHARD_A_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
       SHARD_B_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
     depends_on:
@@ -83,6 +84,7 @@ services:
       REPLICA_HOST: shard-a-1
       SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -97,6 +99,7 @@ services:
       REPLICA_HOST: shard-a-2
       SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-a-db:5432/shard_a
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -111,6 +114,7 @@ services:
       REPLICA_HOST: shard-b-1
       SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -125,6 +129,7 @@ services:
       REPLICA_HOST: shard-b-2
       SHARD_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@shard-b-db:5432/shard_b
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -137,9 +142,12 @@ services:
       - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
     environment:
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
+      COORDINATOR_URL: http://coordinator:8000
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
+      coordinator: {condition: service_healthy}
       shard-a-1: {condition: service_healthy}
       shard-a-2: {condition: service_healthy}
       shard-b-1: {condition: service_healthy}
@@ -150,6 +158,7 @@ services:
     command: ["uvicorn", "services.coordinator.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -159,6 +168,7 @@ services:
     command: ["uvicorn", "services.migration_manager.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}
@@ -168,6 +178,7 @@ services:
     command: ["uvicorn", "services.self_healing.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       METADATA_DATABASE_URL: postgresql://banking:${POSTGRES_PASSWORD}@metadata-db:5432/metadata
+      INTERNAL_2PC_TOKEN: ${TWO_PC_TOKEN:-local-dev-2pc-token-change-me}
     depends_on:
       schema-migrator: {condition: service_completed_successfully}
       metadata-db: {condition: service_healthy}

@@ -168,3 +168,54 @@ def operation_status(account_id: str, request_id: str,
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
     return JSONResponse(status_code=result.http_status, content=result.body)
+
+# Stage 06 internal 2PC protocol. All actions are executed against the shard's
+# shared PostgreSQL, not a process-local in-memory transaction.
+from fastapi import Depends
+from shared.two_pc import PrepareMessage, DecisionMessage
+from shared.participant_2pc import prepare as prepared_vote, finish as prepared_finish, participant_state
+
+
+def _internal_token(x_internal_token: str | None = Header(default=None, alias="X-Internal-Token")):
+    import hmac
+    configured = os.environ.get("INTERNAL_2PC_TOKEN", "")
+    if not configured or x_internal_token is None or not hmac.compare_digest(x_internal_token, configured):
+        raise HTTPException(status_code=403, detail="internal 2PC authentication failed")
+
+
+@app.post("/internal/2pc/prepare", dependencies=[Depends(_internal_token)])
+def prepare_two_pc(body: PrepareMessage):
+    try:
+        return prepared_vote(SHARD_DATABASE_URL, SHARD_ID, body)
+    except RouteRejected as exc:
+        return {"vote": "NO", "reason": exc.detail}
+    except psycopg.Error:
+        log.exception("2pc PREPARE uncertain tx=%s shard=%s", body.tx_id, SHARD_ID)
+        return JSONResponse(status_code=503, content={"vote": "UNKNOWN", "reason": "database busy or unavailable"})
+
+
+@app.post("/internal/2pc/decision", dependencies=[Depends(_internal_token)])
+def decide_two_pc(body: DecisionMessage):
+    if body.shard_id != SHARD_ID:
+        raise HTTPException(status_code=409, detail="incorrect shard")
+    try:
+        answer = prepared_finish(SHARD_DATABASE_URL, SHARD_ID, body.tx_id, body.decision)
+        return JSONResponse(status_code=200 if answer["outcome"] in ("COMMITTED", "ABORTED") else 409
+                            if answer["outcome"] == "CONFLICT" else 503, content=answer)
+    except psycopg.Error:
+        log.exception("2pc DECISION uncertain tx=%s shard=%s", body.tx_id, SHARD_ID)
+        return JSONResponse(status_code=503, content={"outcome": "UNKNOWN"})
+
+
+@app.get("/internal/2pc/{tx_id}/status", dependencies=[Depends(_internal_token)])
+def two_pc_status(tx_id: str):
+    from uuid import UUID
+    try:
+        tx = UUID(tx_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid transaction ID") from exc
+    try:
+        return {"tx_id": str(tx), "shard": SHARD_ID,
+                "participant_state": participant_state(SHARD_DATABASE_URL, SHARD_ID, tx)}
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="participant status unknown") from exc

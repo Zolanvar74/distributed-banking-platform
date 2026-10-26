@@ -135,11 +135,11 @@ def verify() -> None:
                   write(c, "A1500", "withdraw", "3.00", unique())["served_by"]}
         assert b_seen == {"B1", "B2"}, b_seen
         assert balance(c, "A1500") == b0["A1500"][0]
-        cross = transfer(c, "A0500", "A1500", "2.00", unique(), 501)
-        assert "2PC" in cross["detail"], cross
+        # Stage 06 replaces deliberate 501 with genuine 2PC. The standalone
+        # Stage 06 test exercises cross-shard transfers.
         assert balance(c, "A0500") == a0["A0500"][0]
         assert balance(c, "A1500") == b0["A1500"][0]
-        print("PASS B writes distributed; cross-shard transfer refused until genuine 2PC", flush=True)
+        print("PASS B writes distributed; 2PC covered by Stage 06 verification", flush=True)
 
         bad = require(c.post("http://shard-a-1:8000/internal/accounts/A0500/deposit",
                              json={"amount": "1.00", "request_id": unique()},

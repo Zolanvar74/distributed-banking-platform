@@ -1,4 +1,4 @@
-"""Stage 05 shard-aware routing with safe local write semantics.
+"""Stage 06 shard-aware routing with safe local write semantics.
 
 The registry is discovery-only. The Gateway probes *each* candidate to confirm
 it is alive and matches the expected shard and replica identity. On read-only
@@ -18,13 +18,13 @@ from services.gateway.balancer import RoundRobin, identity_ok
 from shared.metadata import Owner, active_shard_map, get_owner, list_replicas
 
 log = logging.getLogger("banking.gateway")
-app = FastAPI(title="Shard-Aware Gateway / Stage 05")
+app = FastAPI(title="Shard-Aware Gateway / Stage 06")
 _balancer = RoundRobin()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "gateway", "stage": "05"}
+    return {"status": "ok", "service": "gateway", "stage": "06"}
 
 
 async def probe_healthy(shard_id: str) -> tuple[list[dict], list[dict]]:
@@ -204,8 +204,8 @@ async def transfer(body: TransferRequest):
         raise HTTPException(status_code=422, detail="source and target must differ")
     source, destination = require_owner(body.from_account), require_owner(body.to_account)
     if source.shard_id != destination.shard_id:
-        # Explicitly refuse partial updates. Full cross-shard 2PC is Stage 06.
-        raise HTTPException(status_code=501, detail="cross-shard transfer requires 2PC (Stage 06)")
+        return await forward_coordinator("/internal/transfers/cross", body.model_dump(),
+                                         request_id=body.request_id, method="POST")
     if source.epoch != destination.epoch:
         raise HTTPException(status_code=409, detail="local transfer crosses different ownership epochs")
     return await forward_write(source.shard_id, source.epoch,
@@ -229,3 +229,86 @@ async def local_status(account_id: str, request_id: str):
             except (httpx.RequestError, ValueError):
                 continue
     raise HTTPException(status_code=503, detail="status currently unavailable")
+
+
+# Stage 06: Gateway invokes the durable coordinator for cross-shard transfers.
+# Unknown coordinator outcomes are returned as UNKNOWN, never "transfer failed".
+import os
+
+
+async def forward_coordinator(path: str, payload: dict | None = None,
+                              request_id: str | None = None, method: str = "GET"):
+    base = os.environ["COORDINATOR_URL"].rstrip("/")
+    token = os.environ["INTERNAL_2PC_TOKEN"]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(24.0, connect=2.0), trust_env=False) as client:
+            if method == "POST":
+                response = await client.post(base + path, json=payload,
+                                             headers={"X-Internal-Token": token})
+            else:
+                response = await client.get(base + path,
+                                            headers={"X-Internal-Token": token})
+            return JSONResponse(status_code=response.status_code, content=response.json())
+    except (httpx.RequestError, ValueError):
+        return JSONResponse(status_code=503, content={
+            "detail": "coordinator unavailable or reply uncertain; query request status",
+            "status": "UNKNOWN", "request_id": request_id,
+        })
+
+
+@app.get("/transactions/{tx_id}")
+async def global_transaction_status(tx_id: str):
+    from uuid import UUID
+    try:
+        txid = str(UUID(tx_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid tx_id") from exc
+    return await forward_coordinator(f"/internal/transactions/{txid}")
+
+
+@app.get("/transfers/requests/{request_id}")
+async def cross_request_status(request_id: str):
+    from urllib.parse import quote
+    return await forward_coordinator(f"/internal/requests/{quote(request_id, safe='')}",
+                                     request_id=request_id)
+
+
+# Stage 06: Gateway invokes durable coordinator for cross-shard transfers.
+import os
+
+
+async def forward_coordinator(path: str, payload: dict | None = None,
+                              request_id: str | None = None, method: str = "GET"):
+    base = os.environ["COORDINATOR_URL"].rstrip("/")
+    token = os.environ["INTERNAL_2PC_TOKEN"]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(24.0, connect=2.0), trust_env=False) as client:
+            if method == "POST":
+                response = await client.post(base + path, json=payload,
+                                             headers={"X-Internal-Token": token})
+            else:
+                response = await client.get(base + path,
+                                            headers={"X-Internal-Token": token})
+            return JSONResponse(status_code=response.status_code, content=response.json())
+    except (httpx.RequestError, ValueError):
+        return JSONResponse(status_code=503, content={
+            "detail": "coordinator unavailable or reply uncertain; query request status",
+            "status": "UNKNOWN", "request_id": request_id,
+        })
+
+
+@app.get("/transactions/{tx_id}")
+async def global_transaction_status(tx_id: str):
+    from uuid import UUID
+    try:
+        txid = str(UUID(tx_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid tx_id") from exc
+    return await forward_coordinator(f"/internal/transactions/{txid}")
+
+
+@app.get("/transfers/requests/{request_id}")
+async def cross_request_status(request_id: str):
+    from urllib.parse import quote
+    return await forward_coordinator(f"/internal/requests/{quote(request_id, safe='')}",
+                                     request_id=request_id)

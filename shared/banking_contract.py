@@ -45,7 +45,7 @@ def canonical_amount(value: str) -> str:
     return f"{Decimal(value):.2f}"
 
 
-def fingerprint(kind: Literal["DEPOSIT", "WITHDRAW", "SAME_SHARD_TRANSFER"],
+def fingerprint(kind: Literal["DEPOSIT", "WITHDRAW", "SAME_SHARD_TRANSFER", "CROSS_SHARD_TRANSFER"],
                 from_account: str, amount: str, to_account: str | None = None) -> str:
     canonical = {"kind": kind, "from_account": from_account,
                  "to_account": to_account, "amount": canonical_amount(amount)}
