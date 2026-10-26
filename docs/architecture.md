@@ -1,19 +1,21 @@
-# Architecture baseline — Stage 02
+# Architecture baseline — Stage 03
 
 ## Running now
 
-- Gateway reads account balances and selects healthy banking replicas.
-- Shard A and B each have one PostgreSQL database and two stateless app replicas.
-- The Metadata DB stores Shard Map and replica endpoints; schemas now also include durable routing epochs, 2PC states, desired replicas and migration states.
-- Each Shard DB now has write-fence ranges, future transaction journals, idempotency and migration replay tables.
-- A one-shot versioned `schema-migrator` is run before application startup and preserves existing Volume data.
-- Coordinator, Migration Manager and Self-Healing are still **placeholder processes** with `/health` only.
+- Gateway uses Metadata's active Shard Map for account ownership and discovers candidate replicas using the persistent Registry.
+- Gateway checks live replica `/health` responses **and verifies shard and replica identity**, then load balances per owning shard.
+- Every Gateway-to-replica balance lookup carries the chosen shard and map epoch; the replica checks its **local ownership fence** and reads the account from the same database snapshot.
+- Shards A and B have independent persistent PostgreSQL databases; their two application replicas share only the owning shard's database.
+- Stage 03 integration checks inspect *both physical databases* and compare actual account placement, Gateway responses and local routing guards.
+- Versioned migrations, immutable 2PC decision scaffolding, per-shard mutation journals, migration checkpoints and Self-Healing registry remain available from Stage 02.
+- The Coordinator, Migration Manager and Self-Healing services are still **health-only placeholders**, not controllers.
 
-## Planned and NOT yet running
+## Planned, NOT yet running
 
-- Read-write banking operations with DB-level locks and epoch checks.
-- Actual 2PC participant PREPARE, durable decisions, and recovery.
-- Online creation of Shard C, consistent Snapshot, commit-ordered CDC and cutover.
-- Docker API-based replica replacement and crash-resilient reconciliation.
+- Mutating banking operations, locks for replica concurrency, local atomic transfers.
+- True PostgreSQL prepared 2PC with durable commit/abort decisions and coordinator recovery.
+- Container replacement by a dedicated Self-Healing Controller and recovery from its crashes.
+- Consistent snapshots, commit-ordered change replay, online Shard C and crash-safe cutover.
+- **Atomic writable ownership**: current read fence check is not a substitute for write-path locking or a fully coordinated epoch transition.
 
-See `docs/stage02-database-contract.md` for the data model, migration safety and limitations.
+See `docs/stage02-database-contract.md` and `docs/stage03-routing-contract.md`.

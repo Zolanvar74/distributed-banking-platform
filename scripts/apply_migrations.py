@@ -63,7 +63,7 @@ def apply_target(name: str, dsn: str, folder: Path) -> None:
 def main() -> None:
     for name, variable, folder in TARGETS:
         apply_target(name, os.environ[variable], folder)
-    print("STAGE 02 MIGRATIONS: ALL APPLIED OR ALREADY PRESENT", flush=True)
+    print("SCHEMA MIGRATIONS: ALL APPLIED OR ALREADY PRESENT", flush=True)
 
 
 if __name__ == "__main__":

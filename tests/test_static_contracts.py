@@ -1,5 +1,5 @@
 """Fast tests, no running Docker environment required."""
-from shared.metadata import ACCOUNT_PATTERN
+from shared.routing import ACCOUNT_PATTERN
 
 
 def test_account_format():
