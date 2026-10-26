@@ -1,5 +1,6 @@
-"""Stage-03 read-only banking participant with local ownership verification."""
+"""Stage-04 read-only banking participant with local ownership verification."""
 import os
+import logging
 from contextlib import asynccontextmanager
 
 import psycopg
@@ -22,7 +23,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=f"Banking Replica {REPLICA_ID} / Stage 03", lifespan=lifespan)
+app = FastAPI(title=f"Banking Replica {REPLICA_ID} / Stage 04", lifespan=lifespan)
+log = logging.getLogger("banking.traffic")
 
 
 @app.get("/health")
@@ -78,6 +80,7 @@ def get_balance(
         raise HTTPException(status_code=503, detail="shard database unavailable") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="account not found on owning shard")
+    log.info("balance_read account=%s shard=%s replica=%s", account_id, SHARD_ID, REPLICA_ID)
     return {
         "account_id": account_id,
         "balance": str(row["balance"]),

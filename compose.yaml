@@ -3,7 +3,7 @@ name: distributed-banking
 # Deliberately NO Docker automatic restart policies: Bonus II requires
 # a custom self-healing controller, implemented in later stages.
 x-app: &app
-  image: distributed-banking-app:stage03
+  image: distributed-banking-app:stage04
   build: .
   networks: [bank-net]
   healthcheck:
@@ -61,7 +61,7 @@ services:
 
   # One-shot schema migrator. Uses named DB volumes and never resets data.
   schema-migrator:
-    image: distributed-banking-app:stage03
+    image: distributed-banking-app:stage04
     build: .
     command: ["python", "scripts/apply_migrations.py"]
     networks: [bank-net]

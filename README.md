@@ -1,9 +1,9 @@
-# Distributed Banking Platform — Stage 03
+# Distributed Banking Platform — Stage 04
 
 **Python 3.12 · FastAPI · PostgreSQL 16 · Docker Compose**  
 This is a continuation of the working Stage 02 project, **not** a fresh installation.
 
-Stage 03 verifies correct two-shard account distribution, Gateway owner selection, live replica checks, and shard-local read routing claims. It preserves all Stage 02 metadata (durable 2PC placeholders, migration checkpoints/fences and replica registry). **Deposits, withdrawals, transfers, actual 2PC, self-healing and online migration are not yet implemented.** Both expert bonuses remain required project milestones.
+Stage 04 verifies correct two-shard account distribution, Gateway owner selection, live replica checks, and shard-local read routing claims. It preserves all Stage 02 metadata (durable 2PC placeholders, migration checkpoints/fences and replica registry). **Deposits, withdrawals, transfers, actual 2PC, self-healing and online migration are not yet implemented.** Both expert bonuses remain required project milestones.
 
 ## Upgrade without wiping previous account data
 
@@ -48,7 +48,7 @@ docker compose exec -T shard-a-db psql -U banking -d shard_a -c "SELECT account_
 docker compose exec -T shard-b-db psql -U banking -d shard_b -c "SELECT account_id, balance FROM accounts ORDER BY account_id;"
 ```
 
-All Stage 03 details, endpoint contracts and limits: [docs/stage03-routing-contract.md](docs/stage03-routing-contract.md).
+All Stage 04 details, endpoint contracts and limits: [docs/stage03-routing-contract.md](docs/stage03-routing-contract.md).
 
 ## Troubleshooting
 
@@ -58,9 +58,9 @@ docker compose logs --tail=100 schema-migrator
 docker compose logs --tail=100 gateway shard-a-1 shard-a-2 shard-b-1 shard-b-2
 ```
 
-If the new health/identity filtering rejects traffic, inspect the banking services' registrations and check whether the correct containers started. Stage 03 uses the existing `replica_registry`; the future autonomous controller is not yet active.
+If the new health/identity filtering rejects traffic, inspect the banking services' registrations and check whether the correct containers started. Stage 04 uses the existing `replica_registry`; the future autonomous controller is not yet active.
 
-## Commit Stage 03 to the SAME GitHub repository
+## Commit Stage 04 to the SAME GitHub repository
 
 Only after all tests pass:
 
@@ -75,3 +75,12 @@ git push origin stage-03
 ```
 
 Check that `.env` is **not** tracked: `git ls-files .env` must print nothing. Never commit database dumps containing private data or `.env` credentials.
+
+
+## Stage 04 — Replica load balancing and failover
+
+See [Stage 04 runbook](docs/stage04-replica-failover.md) for read-only health routing, replica interruption and recovery tests. The Docker image also contains a permanent `PYTHONPATH=/app` fix for the Stage 03 verification command.
+
+```powershell
+docker compose run --rm schema-migrator python -m scripts.verify_stage04 --scenario=normal
+```

@@ -1,6 +1,6 @@
 """Stage 03 integration proof: run on schema-migrator's Docker network.
 
-    docker compose run --rm schema-migrator python scripts/verify_stage03.py
+    docker compose run --rm schema-migrator python -m scripts.verify_stage03
 
 Reads all active account rows in BOTH database shards and validates exactly one
 owning shard; verifies the Gateway and shard-local read fence using real HTTP.
