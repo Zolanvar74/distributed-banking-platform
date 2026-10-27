@@ -19,6 +19,7 @@ TARGETS = (
     ("metadata", "METADATA_DATABASE_URL", MIGRATIONS / "metadata"),
     ("shard-a", "SHARD_A_DATABASE_URL", MIGRATIONS / "shard"),
     ("shard-b", "SHARD_B_DATABASE_URL", MIGRATIONS / "shard"),
+    ("shard-c", "SHARD_C_DATABASE_URL", MIGRATIONS / "shard"),
 )
 
 

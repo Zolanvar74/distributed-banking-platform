@@ -14,6 +14,7 @@ SHARD_ID = os.environ["SHARD_ID"]
 REPLICA_ID = os.environ["REPLICA_ID"]
 REPLICA_HOST = os.environ["REPLICA_HOST"]
 SHARD_DATABASE_URL = os.environ["SHARD_DATABASE_URL"]
+REPLICA_GENERATION = int(os.environ.get("REPLICA_GENERATION", "1"))
 
 
 @asynccontextmanager
@@ -32,7 +33,8 @@ def health():
     try:
         with psycopg.connect(SHARD_DATABASE_URL, connect_timeout=2) as conn:
             conn.execute("SELECT 1")
-        return {"status": "ok", "shard": SHARD_ID, "replica": REPLICA_ID}
+        return {"status": "ok", "shard": SHARD_ID, "replica": REPLICA_ID,
+                "generation": REPLICA_GENERATION}
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="shard database unavailable") from exc
 

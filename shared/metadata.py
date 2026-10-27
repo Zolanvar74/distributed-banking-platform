@@ -49,7 +49,7 @@ def active_shard_map() -> dict:
 def list_replicas(shard_id: str) -> list[dict]:
     with psycopg.connect(os.environ["METADATA_DATABASE_URL"], row_factory=dict_row) as conn:
         return list(conn.execute(
-            "SELECT replica_id, hostname, port FROM replica_registry "
+            "SELECT replica_id, hostname, port, generation FROM replica_registry "
             "WHERE shard_id = %s AND lifecycle IN ('REGISTERED','HEALTHY') "
             "ORDER BY replica_id",
             (shard_id,),
@@ -65,16 +65,25 @@ def register_replica(shard_id: str, replica_id: str, hostname: str) -> None:
     slot = int(match.group(1))
     if slot < 1:
         raise ValueError("Replica slot must be positive")
+    generation = int(os.environ.get("REPLICA_GENERATION", "1"))
+    if generation < 1:
+        raise ValueError("replica generation must be positive")
     with psycopg.connect(os.environ["METADATA_DATABASE_URL"]) as conn:
-        conn.execute(
-            """INSERT INTO replica_registry(replica_id, shard_id, hostname, port, slot)
-               VALUES (%s, %s, %s, 8000, %s)
+        row = conn.execute(
+            """INSERT INTO replica_registry
+               (replica_id, shard_id, hostname, port, slot, generation, lifecycle)
+               VALUES (%s, %s, %s, 8000, %s, %s, 'REGISTERED')
                ON CONFLICT (replica_id)
                DO UPDATE SET shard_id = EXCLUDED.shard_id,
                              hostname = EXCLUDED.hostname,
                              port = EXCLUDED.port,
                              slot = EXCLUDED.slot,
+                             generation = EXCLUDED.generation,
                              lifecycle = 'REGISTERED',
-                             registered_at = now()""",
-            (replica_id, shard_id, hostname, slot),
-        )
+                             registered_at = now()
+               WHERE replica_registry.generation <= EXCLUDED.generation
+               RETURNING replica_id""",
+            (replica_id, shard_id, hostname, slot, generation),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("stale replica generation rejected by durable registry")

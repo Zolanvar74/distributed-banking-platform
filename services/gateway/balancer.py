@@ -9,11 +9,13 @@ import itertools
 from collections.abc import Sequence
 
 
-def identity_ok(identity: object, shard_id: str, replica_id: str) -> bool:
+def identity_ok(identity: object, shard_id: str, replica_id: str,
+                generation: int | None = None) -> bool:
     return (isinstance(identity, dict)
             and identity.get("status") == "ok"
             and identity.get("shard") == shard_id
-            and identity.get("replica") == replica_id)
+            and identity.get("replica") == replica_id
+            and (generation is None or identity.get("generation") == generation))
 
 
 class RoundRobin:

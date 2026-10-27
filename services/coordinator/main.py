@@ -54,6 +54,23 @@ def _create_or_find(body: TransferRequest) -> UUID:
                     raise HTTPException(status_code=409, detail="request_id reused with different transfer")
                 return existing["tx_id"]
             accounts = [body.from_account, body.to_account]
+            # Stage 12 fencing gate shares routing_epoch's lock with map
+            # activation: no NEW 2PC reservation may enter the moving range
+            # after FENCING begins. Existing request IDs were handled above.
+            from shared.routing import account_number
+            for account in accounts:
+                number = account_number(account)
+                if number is None:
+                    raise HTTPException(status_code=404, detail="invalid account")
+                migrating = conn.execute(
+                    "SELECT 1 FROM migration_jobs "
+                    "WHERE %s BETWEEN range_start AND range_end "
+                    "AND phase IN ('FENCING','FINAL_REPLAY','MAP_ACTIVATED')",
+                    (number,),
+                ).fetchone()
+                if migrating:
+                    raise HTTPException(status_code=503,
+                        detail="ownership cutover in progress; retry same request_id")
             # Both ownership lookups are made in one database transaction.
             owners = []
             for account in accounts:
@@ -126,6 +143,7 @@ def _post_participant(shard: str, path: str, payload: dict) -> dict | None:
                 probe = client.get(host + "/health", timeout=1.5)
                 if probe.status_code != 200 or probe.json().get("shard") != shard or (
                     probe.json().get("replica") != replica["replica_id"]
+                    or probe.json().get("generation") != replica.get("generation")
                 ):
                     continue
             except (httpx.RequestError, ValueError):
@@ -297,6 +315,20 @@ def health():
 
 @app.post("/internal/transfers/cross", dependencies=[Depends(_internal_token)])
 async def cross_transfer(body: TransferRequest):
+    # Defense-in-depth for direct internal calls bypassing the Gateway. A
+    # historical B->B transfer must not be reinterpreted as a fresh B->C 2PC.
+    from shared.migration_idempotency import archive_guard, touches_migrated_range
+    if touches_migrated_range([body.from_account, body.to_account]):
+        try:
+            archived = await asyncio.to_thread(
+                archive_guard, META, body.request_id,
+                kind="SAME_SHARD_TRANSFER", source=body.from_account,
+                amount=body.amount, destination=body.to_account)
+        except psycopg.Error as exc:
+            raise HTTPException(status_code=503, detail="legacy request index unavailable") from exc
+        if archived is not None:
+            code, payload = archived
+            return JSONResponse(status_code=code, content=payload)
     txid = await asyncio.to_thread(_create_or_find, body)
     try:
         await asyncio.to_thread(_drive, txid)

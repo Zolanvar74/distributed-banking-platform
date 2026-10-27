@@ -18,13 +18,13 @@ from services.gateway.balancer import RoundRobin, identity_ok
 from shared.metadata import Owner, active_shard_map, get_owner, list_replicas
 
 log = logging.getLogger("banking.gateway")
-app = FastAPI(title="Shard-Aware Gateway / Stage 07")
+app = FastAPI(title="Shard-Aware Gateway / Stage 08")
 _balancer = RoundRobin()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "gateway", "stage": "07"}
+    return {"status": "ok", "service": "gateway", "stage": "08"}
 
 
 async def probe_healthy(shard_id: str) -> tuple[list[dict], list[dict]]:
@@ -41,7 +41,8 @@ async def probe_healthy(shard_id: str) -> tuple[list[dict], list[dict]]:
                 response = await client.get(url)
                 if response.status_code != 200:
                     return False
-                return identity_ok(response.json(), shard_id, replica["replica_id"])
+                return identity_ok(response.json(), shard_id, replica["replica_id"],
+                                   replica.get("generation"))
             except (httpx.RequestError, ValueError, TypeError):
                 return False
 
@@ -182,8 +183,55 @@ async def forward_write(shard_id: str, epoch: int, path: str,
     return JSONResponse(status_code=response.status_code, content=data)
 
 
+# Stage 13: retain the original request outcome across B->C ownership changes.
+# Read-only metadata checks fail CLOSED (503) on database errors. Never reroute
+# a duplicate local request onto the newly owning shard before backfill.
+from shared.banking_contract import fingerprint
+from shared.migration_idempotency import archive_guard, touches_migrated_range
+
+
+def _historical_local(request_id: str, kind: str, source: str,
+                      amount: str, destination: str | None = None):
+    accounts = [source] + ([destination] if destination else [])
+    if not touches_migrated_range(accounts):
+        return None
+    try:
+        result = archive_guard(os.environ["METADATA_DATABASE_URL"], request_id,
+                               kind=kind, source=source,
+                               amount=amount, destination=destination)
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="legacy request metadata unavailable") from exc
+    if result is None:
+        return None
+    code, body = result
+    return JSONResponse(status_code=code, content=body)
+
+
+def _previous_cross(body: TransferRequest):
+    """Request ID wins over any changed account ownership in Shard Map."""
+    try:
+        with psycopg.connect(os.environ["METADATA_DATABASE_URL"]) as db:
+            row = db.execute("SELECT tx_id,request_fingerprint FROM transactions "
+                             "WHERE client_request_id=%s", (body.request_id,)).fetchone()
+        if row is None:
+            return None
+        expected = fingerprint("CROSS_SHARD_TRANSFER",body.from_account,
+                               body.amount,body.to_account)
+        if row[1] != expected:
+            return JSONResponse(status_code=409, content={
+                "detail": "request_id reused for a different transfer",
+                "request_id": body.request_id})
+        code, data = status_for_tx(os.environ["METADATA_DATABASE_URL"], row[0])
+        return JSONResponse(status_code=code, content=data)
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="transaction metadata unavailable") from exc
+
+
 @app.post("/accounts/{account_id}/deposit")
 async def deposit(account_id: str, body: WriteRequest):
+    old = await asyncio.to_thread(_historical_local, body.request_id, "DEPOSIT", account_id, body.amount)
+    if old is not None:
+        return old
     owner = require_owner(account_id)
     return await forward_write(owner.shard_id, owner.epoch,
                                f"/internal/accounts/{account_id}/deposit",
@@ -192,6 +240,9 @@ async def deposit(account_id: str, body: WriteRequest):
 
 @app.post("/accounts/{account_id}/withdraw")
 async def withdraw(account_id: str, body: WriteRequest):
+    old = await asyncio.to_thread(_historical_local, body.request_id, "WITHDRAW", account_id, body.amount)
+    if old is not None:
+        return old
     owner = require_owner(account_id)
     return await forward_write(owner.shard_id, owner.epoch,
                                f"/internal/accounts/{account_id}/withdraw",
@@ -202,6 +253,15 @@ async def withdraw(account_id: str, body: WriteRequest):
 async def transfer(body: TransferRequest):
     if body.from_account == body.to_account:
         raise HTTPException(status_code=422, detail="source and target must differ")
+    old_cross = await asyncio.to_thread(_previous_cross, body)
+    if old_cross is not None:
+        return old_cross
+    # This catches a B->B transfer that becomes B->C after the map switch.
+    old_local = await asyncio.to_thread(
+        _historical_local, body.request_id, "SAME_SHARD_TRANSFER",
+        body.from_account, body.amount, body.to_account)
+    if old_local is not None:
+        return old_local
     source, destination = require_owner(body.from_account), require_owner(body.to_account)
     if source.shard_id != destination.shard_id:
         return await forward_coordinator("/internal/transfers/cross", body.model_dump(),
@@ -215,6 +275,16 @@ async def transfer(body: TransferRequest):
 @app.get("/accounts/{account_id}/operations/{request_id}")
 async def local_status(account_id: str, request_id: str):
     """Shard-local result lookup only; cross-shard/global recovery comes later."""
+    from shared.migration_idempotency import archived_local_status, touches_migrated_range
+    if touches_migrated_range([account_id]):
+        try:
+            history = await asyncio.to_thread(
+                archived_local_status, os.environ["METADATA_DATABASE_URL"],account_id,request_id)
+        except psycopg.Error as exc:
+            raise HTTPException(status_code=503, detail="historical status unavailable") from exc
+        if history is not None:
+            code, payload = history
+            return JSONResponse(status_code=code, content=payload)
     owner = require_owner(account_id)
     replicas = await ordered_healthy(owner.shard_id)
     headers = {"X-Expected-Shard": owner.shard_id, "X-Routing-Epoch": str(owner.epoch)}

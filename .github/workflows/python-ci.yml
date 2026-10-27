@@ -1,0 +1,27 @@
+name: banking-code-checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Validate Python syntax
+        run: python -m compileall -q shared services scripts tests
+      - name: Unit and contract tests
+        run: python -m pytest -q tests
+      - name: Validate Compose config
+        env:
+          POSTGRES_PASSWORD: ci-non-production-password
+        run: docker compose config --quiet
